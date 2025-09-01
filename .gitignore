@@ -30,3 +30,4 @@ backups/
 
 # Misc
 .cache/
+.gh-config
