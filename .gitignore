@@ -1,0 +1,32 @@
+# System
+.DS_Store
+Thumbs.db
+
+# Node
+node_modules/
+
+# PHP / Composer
+vendor/
+composer.lock
+
+# Laravel / Bagisto
+.env
+/storage/
+/bootstrap/cache/
+
+# Docker / local
+docker-compose.override.yml
+/.env.*
+
+# Backups and DB dumps
+backups/
+*.tgz
+*.tar.gz
+*.sql
+
+# IDEs
+.vscode/
+.idea/
+
+# Misc
+.cache/
