@@ -1,0 +1,184 @@
+version: "3.9"
+
+networks:
+  internal:
+  edge:
+    external: true
+
+volumes:
+  bagisto_app:
+  bagisto_vendor:
+  bagisto_storage:
+  mysql_data:
+  redis_data:
+  n8n_data:
+
+services:
+  # ===== DB (opção 1: MariaDB - recomendada p/ Synology/ARM) =====
+  db:
+    image: mariadb:10.11
+  # # platform: linux/arm64
+    restart: unless-stopped
+    environment:
+      MARIADB_DATABASE: bagisto
+      MARIADB_USER: bagisto
+      MARIADB_PASSWORD: bagisto_pass
+      MARIADB_ROOT_PASSWORD: root_pass
+    command: ["--character-set-server=utf8mb4","--collation-server=utf8mb4_unicode_ci"]
+    volumes:
+      - mysql_data:/var/lib/mysql
+    networks: [internal]
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # # ===== DB (opção 2: MySQL 8 — se você quiser manter) =====
+  # db:
+  #   image: mysql:8.0
+  #   command: [
+  #     "--default-authentication-plugin=mysql_native_password",
+  #     "--character-set-server=mysql_native_password",
+  #     "--character-set-server=utf8mb4",
+  #     "--collation-server=utf8mb4_unicode_ci"
+  #   ]
+  #   environment:
+  #     MYSQL_DATABASE: bagisto
+  #     MYSQL_USER: bagisto
+  #     MYSQL_PASSWORD: bagisto_pass
+  #     MYSQL_ROOT_PASSWORD: root_pass
+  #   volumes:
+  #     - mysql_data:/var/lib/mysql
+  #   networks: [internal]
+  #   healthcheck:
+  #     test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+  #     interval: 10s
+  #     timeout: 5s
+  #     retries: 10
+
+  redis:
+    image: redis:7-alpine
+  # platform: linux/arm64
+    restart: unless-stopped
+    command: ["redis-server","--appendonly","yes"]
+    volumes:
+      - redis_data:/data
+    networks: [internal]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # >>>>> AQUI: damos um NOME explícito à imagem
+  bagisto-app:
+    build:
+      context: ./bagisto
+      dockerfile: Dockerfile
+    image: lumyfy/bagisto-app:latest
+    restart: unless-stopped
+    environment:
+      APP_NAME: "Lumyfy"
+      APP_ENV: production
+      APP_DEBUG: "false"
+      APP_URL: "https://www.lumyfy.com"
+      APP_TIMEZONE: "America/Sao_Paulo"
+      APP_LOCALE: "pt_BR"
+      # Banco (ajuste chaves se estiver usando MariaDB vs MySQL — são as mesmas)
+      DB_CONNECTION: mysql
+      DB_HOST: db
+      DB_PORT: 3306
+      DB_DATABASE: bagisto
+      DB_USERNAME: bagisto
+      DB_PASSWORD: bagisto_pass
+      # Cache / Sessão / Fila
+      CACHE_DRIVER: redis
+      SESSION_DRIVER: redis
+      QUEUE_CONNECTION: redis
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      # Proxy
+      TRUSTED_PROXIES: "*"
+      # Admin inicial
+      ADMIN_NAME: "Admin Lumyfy"
+      ADMIN_EMAIL: "admin@lumyfy.com"
+      ADMIN_PASSWORD: "ChangeMe123!"
+      DEFAULT_COUNTRY: "BR"
+      DEFAULT_CURRENCY: "BRL"
+    depends_on:
+      - db
+      - redis
+    volumes:
+      - bagisto_app:/var/www/html
+      - bagisto_vendor:/var/www/html/vendor
+      - bagisto_storage:/var/www/html/storage
+    networks: [internal]
+
+  bagisto-web:
+    image: nginx:1.27-alpine
+  # platform: linux/arm64
+    restart: unless-stopped
+    depends_on:
+      - bagisto-app
+    volumes:
+      - bagisto_app:/var/www/html:ro
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    expose:
+      - "80"
+    ports:
+      - "8080:80" # opcional pela LAN
+    networks:
+      - internal
+      - edge
+
+  # >>>>> AQUI: use a MESMA imagem nomeada
+  bagisto-queue:
+    image: lumyfy/bagisto-app:latest
+  # platform: linux/arm64
+    restart: unless-stopped
+    depends_on:
+      - bagisto-app
+    command: bash -lc "php artisan queue:work --tries=3 --timeout=120"
+    environment:
+      QUEUE_CONNECTION: redis
+      REDIS_HOST: redis
+    volumes:
+      - bagisto_app:/var/www/html
+      - bagisto_vendor:/var/www/html/vendor
+      - bagisto_storage:/var/www/html/storage
+    networks: [internal]
+
+  bagisto-scheduler:
+    image: lumyfy/bagisto-app:latest
+  # platform: linux/arm64
+    restart: unless-stopped
+    depends_on:
+      - bagisto-app
+    command: bash -lc 'while true; do php artisan schedule:run --verbose --no-interaction; sleep 60; done'
+    volumes:
+      - bagisto_app:/var/www/html
+      - bagisto_vendor:/var/www/html/vendor
+      - bagisto_storage:/var/www/html/storage
+    networks: [internal]
+
+  n8n:
+    image: n8nio/n8n:latest
+    restart: unless-stopped
+    environment:
+      - N8N_HOST=n8n.lumyfy.com
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=https
+      - WEBHOOK_URL=https://n8n.lumyfy.com/
+      - N8N_EDITOR_BASE_URL=https://n8n.lumyfy.com/
+      - GENERIC_TIMEZONE=America/Sao_Paulo
+      - N8N_ENCRYPTION_KEY=PLEASE_CHANGE_ME_32CHARS_MIN
+    volumes:
+      - n8n_data:/home/node/.n8n
+    expose:
+      - "5678"
+    ports:
+      - "5678:5678" # opcional LAN
+    networks:
+      - internal
+      - edge

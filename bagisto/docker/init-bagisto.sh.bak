@@ -1,0 +1,105 @@
+#!/usr/bin/env bash
+set -e
+
+APP_DIR=/var/www/html
+
+echo "🔧 Iniciando instalação/provisionamento do Bagisto…"
+
+
+# Só baixa o Bagisto se a pasta estiver realmente vazia (sem arquivos ocultos ou visíveis)
+
+# Se não existe o arquivo artisan, sempre instala o Bagisto, mesmo que haja arquivos no diretório
+
+# Se não existe o arquivo artisan, limpa o diretório e instala o Bagisto
+
+# Se não existe o arquivo artisan, instala o Bagisto em /tmp/bagisto e copia para /var/www/html
+if [ ! -f "$APP_DIR/artisan" ]; then
+  echo "→ Instalando Bagisto em diretório temporário…"
+  rm -rf /tmp/bagisto && mkdir -p /tmp/bagisto
+  composer create-project bagisto/bagisto /tmp/bagisto --no-interaction --prefer-dist
+  echo "→ Copiando arquivos do Bagisto para $APP_DIR (sem sobrescrever vendor/storage)…"
+  rsync -a --exclude vendor --exclude storage /tmp/bagisto/ "$APP_DIR/"
+fi
+
+cd "$APP_DIR"
+
+# Garante que as pastas essenciais existem
+mkdir -p storage bootstrap/cache
+# Permissões mínimas
+chown -R www-data:www-data $APP_DIR
+find $APP_DIR -type f -exec chmod 664 {} \;
+find $APP_DIR -type d -exec chmod 775 {} \;
+chmod -R ug+rwx storage bootstrap/cache
+
+# .env
+if [ ! -f ".env" ]; then
+  cp .env.example .env
+
+  # Variáveis vindas do compose
+  sed -i "s|APP_NAME=.*|APP_NAME=\"${APP_NAME:-Lumyfy}\"|g" .env
+  sed -i "s|APP_ENV=.*|APP_ENV=${APP_ENV:-production}|g" .env
+  sed -i "s|APP_DEBUG=.*|APP_DEBUG=${APP_DEBUG:-false}|g" .env
+  sed -i "s|APP_URL=.*|APP_URL=${APP_URL:-http://localhost}|g" .env
+  sed -i "s|APP_TIMEZONE=.*|APP_TIMEZONE=${APP_TIMEZONE:-UTC}|g" .env
+
+  sed -i "s|DB_CONNECTION=.*|DB_CONNECTION=${DB_CONNECTION:-mysql}|g" .env
+  sed -i "s|DB_HOST=.*|DB_HOST=${DB_HOST:-db}|g" .env
+  sed -i "s|DB_PORT=.*|DB_PORT=${DB_PORT:-3306}|g" .env
+  sed -i "s|DB_DATABASE=.*|DB_DATABASE=${DB_DATABASE:-bagisto}|g" .env
+  sed -i "s|DB_USERNAME=.*|DB_USERNAME=${DB_USERNAME:-bagisto}|g" .env
+  sed -i "s|DB_PASSWORD=.*|DB_PASSWORD=${DB_PASSWORD:-bagisto_pass}|g" .env
+
+  sed -i "s|CACHE_DRIVER=.*|CACHE_DRIVER=${CACHE_DRIVER:-file}|g" .env
+  sed -i "s|QUEUE_CONNECTION=.*|QUEUE_CONNECTION=${QUEUE_CONNECTION:-sync}|g" .env
+  sed -i "s|SESSION_DRIVER=.*|SESSION_DRIVER=${SESSION_DRIVER:-file}|g" .env
+  sed -i "s|REDIS_HOST=.*|REDIS_HOST=${REDIS_HOST:-redis}|g" .env
+  sed -i "s|REDIS_PORT=.*|REDIS_PORT=${REDIS_PORT:-6379}|g" .env
+
+  # Confiança no proxy (Cloudflare/NPM)
+  if ! grep -q "TRUSTED_PROXIES" .env; then
+    echo "TRUSTED_PROXIES=${TRUSTED_PROXIES:-*}" >> .env
+  fi
+fi
+
+# Instala dependências PHP do projeto (se necessário)
+if [ ! -d "vendor" ]; then
+  composer install --no-interaction --no-dev --prefer-dist --optimize-autoloader
+fi
+
+# Key + Migrate + Seed + Theme
+php artisan key:generate --force || true
+
+# bagisto:install é interativo em algumas versões; fazemos a sequência manual:
+php artisan migrate --force
+php artisan db:seed --force || true
+php artisan storage:link || true
+
+# Admin padrão (idempotente)
+php -r "
+require 'vendor/autoload.php';
+\$app = require 'bootstrap/app.php';
+\$kernel = \$app->make(Illuminate\Contracts\Console\Kernel::class);
+\$kernel->bootstrap();
+try {
+  \$adminModel = \Webkul\User\Models\Admin::class;
+  if (!\$adminModel::where('email', getenv('ADMIN_EMAIL') ?: 'admin@lumyfy.com')->exists()) {
+    \$adminModel::create([
+      'name' => getenv('ADMIN_NAME') ?: 'Admin Lumyfy',
+      'email' => getenv('ADMIN_EMAIL') ?: 'admin@lumyfy.com',
+      'password' => bcrypt(getenv('ADMIN_PASSWORD') ?: 'ChangeMe123!'),
+      'status' => 1,
+      'role_id' => 1
+    ]);
+  }
+} catch (\Throwable \$e) {
+  fwrite(STDERR, 'Aviso: não foi possível criar admin via script: ' . \$e->getMessage() . PHP_EOL);
+}
+"
+
+# Cache
+php artisan config:cache || true
+php artisan route:cache || true
+php artisan view:cache || true
+
+echo "✅ Bagisto pronto."
+exec "$@"
